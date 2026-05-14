@@ -94,10 +94,10 @@ print(pair_counts.to_string())
 print("\nLikely view orientation by class (heuristic from aspect ratio):")
 view_breakdown = df.groupby(["label", "likely_view"]).size().unstack(fill_value=0)
 # Ensure consistent column order
-for col in ["axial", "coronal_or_sagittal", "wide_other"]:
+for col in ["axial", "coronal"]:
     if col not in view_breakdown.columns:
         view_breakdown[col] = 0
-view_breakdown = view_breakdown[["axial", "coronal_or_sagittal", "wide_other"]]
+view_breakdown = view_breakdown[["axial", "coronal"]]
 print(view_breakdown.to_string())
 
 # Percentages
