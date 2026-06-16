@@ -1,0 +1,303 @@
+"""
+K-fold cross-validation training of ResNet50 on the unified KiTS+Mendeley dataset.
+
+For each fold:
+  - That fold's images are the test set
+  - The remaining 4 folds are split 90/10 by patient into train/val
+  - ResNet50 (ImageNet pretrained) is trained for N epochs with class-weighted CE
+  - Best checkpoint by val macro-F1 is saved
+  - Final test metrics are recorded for that fold
+
+After all folds:
+  - mean and std of every metric across folds is computed and saved
+"""
+import os
+import csv
+import json
+import argparse
+import random
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+from torch.cuda.amp import autocast, GradScaler
+from torchvision import transforms, models
+from PIL import Image
+from sklearn.model_selection import GroupShuffleSplit
+from sklearn.metrics import (
+    accuracy_score, f1_score, roc_auc_score,
+    precision_recall_fscore_support, confusion_matrix
+)
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--epochs", type=int, default=25)
+parser.add_argument("--batch-size", type=int, default=64)
+parser.add_argument("--lr", type=float, default=1e-4)
+parser.add_argument("--weight-decay", type=float, default=1e-4)
+parser.add_argument("--num-workers", type=int, default=4)
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--tag", type=str, default="run1",
+                    help="Suffix for the output directory — e.g. 'run1' or 'seed42'")
+args = parser.parse_args()
+
+SCRATCH = Path(os.environ["SCRATCH"])
+MANIFEST = SCRATCH / "kidney-data/processed/unified_kits_mendeley/manifest_with_folds.csv"
+OUT = SCRATCH / "kidney-results/kfold" / args.tag
+OUT.mkdir(parents=True, exist_ok=True)
+
+random.seed(args.seed); np.random.seed(args.seed)
+torch.manual_seed(args.seed); torch.cuda.manual_seed_all(args.seed)
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+CLASSES = ["Normal", "Cyst", "Tumor", "Stone"]
+LABEL2IDX = {c: i for i, c in enumerate(CLASSES)}
+IDX2LABEL = {i: c for c, i in LABEL2IDX.items()}
+IMG_SIZE = 224
+N_FOLDS = 5
+
+print(f"Device: {DEVICE} | Output: {OUT}")
+df = pd.read_csv(MANIFEST)
+print(f"Loaded {len(df)} images, {df['patient_id'].nunique()} patients")
+
+# ---------------------------------------------------------------------------
+# Dataset class
+# ---------------------------------------------------------------------------
+class KidneyDataset(Dataset):
+    def __init__(self, df, transform):
+        self.df = df.reset_index(drop=True)
+        self.transform = transform
+    def __len__(self):
+        return len(self.df)
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        im = Image.open(row["path"]).convert("L").convert("RGB")
+        if self.transform:
+            im = self.transform(im)
+        return im, LABEL2IDX[row["label"]]
+
+train_tf = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.ColorJitter(brightness=0.1, contrast=0.1),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+eval_tf = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+# ---------------------------------------------------------------------------
+# K-fold loop
+# ---------------------------------------------------------------------------
+fold_metrics = []
+
+for fold in range(N_FOLDS):
+    print(f"\n{'=' * 60}\nFOLD {fold} / {N_FOLDS - 1}\n{'=' * 60}")
+    fold_out = OUT / f"fold_{fold}"
+    fold_out.mkdir(exist_ok=True)
+
+    test_df = df[df["fold"] == fold].reset_index(drop=True)
+    trainval_df = df[df["fold"] != fold].reset_index(drop=True)
+
+    # Inner train/val split — 90/10 by patient (no leakage)
+    splitter = GroupShuffleSplit(n_splits=1, test_size=0.10, random_state=args.seed)
+    train_idx, val_idx = next(splitter.split(
+        trainval_df.index.values,
+        groups=trainval_df["patient_id"].values
+    ))
+    train_df = trainval_df.iloc[train_idx].reset_index(drop=True)
+    val_df = trainval_df.iloc[val_idx].reset_index(drop=True)
+    print(f"  Train: {len(train_df):5d} images  /  {train_df['patient_id'].nunique()} patients")
+    print(f"  Val:   {len(val_df):5d} images  /  {val_df['patient_id'].nunique()} patients")
+    print(f"  Test:  {len(test_df):5d} images  /  {test_df['patient_id'].nunique()} patients")
+
+    # Class weights from training set (per-fold)
+    class_counts = train_df["label"].value_counts()
+    total = len(train_df)
+    class_weights = torch.tensor(
+        [total / (len(CLASSES) * class_counts.get(c, 1)) for c in CLASSES],
+        dtype=torch.float32
+    ).to(DEVICE)
+    print(f"  Class weights: {dict(zip(CLASSES, [round(w, 3) for w in class_weights.tolist()]))}")
+
+    # Loaders
+    train_loader = DataLoader(KidneyDataset(train_df, train_tf),
+                              batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    val_loader = DataLoader(KidneyDataset(val_df, eval_tf),
+                            batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.num_workers, pin_memory=True)
+    test_loader = DataLoader(KidneyDataset(test_df, eval_tf),
+                             batch_size=args.batch_size, shuffle=False,
+                             num_workers=args.num_workers, pin_memory=True)
+
+    # Fresh model per fold (re-init from ImageNet weights)
+    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+    model.fc = nn.Linear(model.fc.in_features, len(CLASSES))
+    model = model.to(DEVICE)
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
+                                   weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = GradScaler()
+
+    log_path = fold_out / "log.csv"
+    with open(log_path, "w", newline="") as f:
+        csv.writer(f).writerow(["epoch", "train_loss", "train_acc",
+                                 "val_loss", "val_acc", "val_macro_f1", "lr"])
+
+    best_val_f1 = 0.0
+    for epoch in range(args.epochs):
+        # Train
+        model.train()
+        tl, tc, tn = 0.0, 0, 0
+        for img, y in train_loader:
+            img, y = img.to(DEVICE, non_blocking=True), y.to(DEVICE, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            with autocast():
+                out = model(img)
+                loss = criterion(out, y)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            tl += loss.item() * img.size(0)
+            tc += (out.argmax(1) == y).sum().item()
+            tn += img.size(0)
+        tl /= tn; ta = tc / tn
+
+        # Val
+        model.eval()
+        vl, vc, vn, vp, vt = 0.0, 0, 0, [], []
+        with torch.no_grad():
+            for img, y in val_loader:
+                img, y = img.to(DEVICE, non_blocking=True), y.to(DEVICE, non_blocking=True)
+                with autocast():
+                    out = model(img); loss = criterion(out, y)
+                vl += loss.item() * img.size(0)
+                p = out.argmax(1)
+                vc += (p == y).sum().item(); vn += img.size(0)
+                vp.extend(p.cpu().numpy()); vt.extend(y.cpu().numpy())
+        vl /= vn; va = vc / vn
+        val_f1 = f1_score(vt, vp, average="macro", zero_division=0)
+        scheduler.step()
+        lr_now = optimizer.param_groups[0]["lr"]
+        print(f"  Epoch {epoch+1:02d}/{args.epochs} | tr_acc={ta:.3f} | "
+              f"val_acc={va:.3f} val_F1={val_f1:.3f} | lr={lr_now:.2e}")
+        with open(log_path, "a", newline="") as f:
+            csv.writer(f).writerow([epoch+1, f"{tl:.6f}", f"{ta:.6f}",
+                                     f"{vl:.6f}", f"{va:.6f}",
+                                     f"{val_f1:.6f}", f"{lr_now:.2e}"])
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            torch.save({"epoch": epoch + 1, "model_state": model.state_dict(),
+                        "val_macro_f1": val_f1, "fold": fold},
+                       fold_out / "best.pth")
+
+    # Test eval with best checkpoint
+    print(f"  Loading best checkpoint (val_F1={best_val_f1:.4f})...")
+    ckpt = torch.load(fold_out / "best.pth", map_location=DEVICE, weights_only=False)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+    t_p, t_t, t_pr = [], [], []
+    with torch.no_grad():
+        for img, y in test_loader:
+            img = img.to(DEVICE, non_blocking=True)
+            with autocast():
+                out = model(img)
+            t_pr.extend(torch.softmax(out, dim=1).cpu().numpy())
+            t_p.extend(out.argmax(1).cpu().numpy())
+            t_t.extend(y.numpy())
+    t_p = np.array(t_p); t_t = np.array(t_t); t_pr = np.array(t_pr)
+
+    acc = accuracy_score(t_t, t_p)
+    macro_f1 = f1_score(t_t, t_p, average="macro", zero_division=0)
+    pcl = precision_recall_fscore_support(t_t, t_p, labels=range(len(CLASSES)), zero_division=0)
+    aucs = {}
+    for i, c in enumerate(CLASSES):
+        try:
+            aucs[c] = float(roc_auc_score((t_t == i).astype(int), t_pr[:, i]))
+        except ValueError:
+            aucs[c] = None
+    macro_auc = float(np.mean([v for v in aucs.values() if v is not None]))
+    cm = confusion_matrix(t_t, t_p, labels=range(len(CLASSES)))
+
+    fold_result = {
+        "fold": fold,
+        "best_epoch": int(ckpt["epoch"]),
+        "best_val_macro_f1": float(best_val_f1),
+        "test_accuracy": float(acc),
+        "test_macro_f1": float(macro_f1),
+        "test_macro_auc": macro_auc,
+        "per_class": {c: {
+            "precision": float(pcl[0][i]), "recall": float(pcl[1][i]),
+            "f1": float(pcl[2][i]), "support": int(pcl[3][i]), "auc": aucs[c]
+        } for i, c in enumerate(CLASSES)},
+        "confusion_matrix": cm.tolist(),
+    }
+    with open(fold_out / "metrics.json", "w") as f:
+        json.dump(fold_result, f, indent=2)
+
+    # Confusion matrix plot
+    fig, ax = plt.subplots(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
+                xticklabels=CLASSES, yticklabels=CLASSES, ax=ax)
+    ax.set_xlabel("Predicted"); ax.set_ylabel("True")
+    ax.set_title(f"Fold {fold} | acc={acc:.3f} macro-F1={macro_f1:.3f}")
+    plt.tight_layout()
+    plt.savefig(fold_out / "confusion_matrix.png", dpi=110, bbox_inches="tight")
+    plt.close()
+
+    print(f"  Fold {fold} test: acc={acc:.4f}, macro-F1={macro_f1:.4f}, macro-AUC={macro_auc:.4f}")
+    fold_metrics.append(fold_result)
+
+# ---------------------------------------------------------------------------
+# Aggregate across folds
+# ---------------------------------------------------------------------------
+print(f"\n{'=' * 60}\nAGGREGATE (mean ± std across {N_FOLDS} folds)\n{'=' * 60}")
+accs = [m["test_accuracy"] for m in fold_metrics]
+f1s = [m["test_macro_f1"] for m in fold_metrics]
+aucs = [m["test_macro_auc"] for m in fold_metrics]
+print(f"Accuracy:    {np.mean(accs):.4f} ± {np.std(accs):.4f}")
+print(f"Macro-F1:    {np.mean(f1s):.4f} ± {np.std(f1s):.4f}")
+print(f"Macro-AUC:   {np.mean(aucs):.4f} ± {np.std(aucs):.4f}")
+print()
+print("Per-class F1 (mean ± std across folds):")
+for c in CLASSES:
+    pc_f1 = [m["per_class"][c]["f1"] for m in fold_metrics]
+    pc_auc = [m["per_class"][c]["auc"] for m in fold_metrics if m["per_class"][c]["auc"] is not None]
+    auc_str = f"AUC={np.mean(pc_auc):.4f} ± {np.std(pc_auc):.4f}" if pc_auc else "AUC=N/A"
+    print(f"  {c:<8} F1={np.mean(pc_f1):.4f} ± {np.std(pc_f1):.4f}  {auc_str}")
+
+summary = {
+    "n_folds": N_FOLDS,
+    "epochs": args.epochs,
+    "batch_size": args.batch_size,
+    "lr": args.lr,
+    "weight_decay": args.weight_decay,
+    "seed": args.seed,
+    "fold_results": fold_metrics,
+    "aggregate": {
+        "accuracy_mean": float(np.mean(accs)), "accuracy_std": float(np.std(accs)),
+        "macro_f1_mean": float(np.mean(f1s)), "macro_f1_std": float(np.std(f1s)),
+        "macro_auc_mean": float(np.mean(aucs)), "macro_auc_std": float(np.std(aucs)),
+        "per_class_f1": {
+            c: {
+                "mean": float(np.mean([m["per_class"][c]["f1"] for m in fold_metrics])),
+                "std":  float(np.std([m["per_class"][c]["f1"] for m in fold_metrics])),
+            } for c in CLASSES
+        },
+    },
+}
+with open(OUT / "summary.json", "w") as f:
+    json.dump(summary, f, indent=2)
+print(f"\nSaved aggregate summary to {OUT / 'summary.json'}")
