@@ -45,14 +45,20 @@ parser.add_argument("--tag", type=str, default="v2_run1")
 parser.add_argument("--manifest", type=str, default="v2",
                     choices=["v2", "v2_roi"],
                     help="Which manifest to use: v2 (full image) or v2_roi (ROI crops)")
+parser.add_argument("--seed-suffix", type=str, default="",
+                    help="Suffix for manifest file (e.g. '_seed123'). Default uses seed 42 manifest.")
 args = parser.parse_args()
 
 SCRATCH = Path(os.environ["SCRATCH"])
-MANIFEST_PATHS = {
-    "v2": SCRATCH / "kidney-data/processed/unified_v2/manifest_with_folds.csv",
-    "v2_roi": SCRATCH / "kidney-data/processed/unified_v2_roi/manifest_with_folds.csv",
+manifest_dir_map = {
+    "v2": SCRATCH / "kidney-data/processed/unified_v2",
+    "v2_roi": SCRATCH / "kidney-data/processed/unified_v2_roi",
 }
-MANIFEST = MANIFEST_PATHS[args.manifest]
+manifest_name = f"manifest_with_folds{args.seed_suffix}.csv"
+MANIFEST = manifest_dir_map[args.manifest] / manifest_name
+if not MANIFEST.exists():
+    raise SystemExit(f"Manifest not found: {MANIFEST}")
+print(f"Using manifest: {MANIFEST}")
 print(f"Using manifest: {args.manifest} ({MANIFEST})")
 OUT = SCRATCH / "kidney-results/kfold" / args.tag
 OUT.mkdir(parents=True, exist_ok=True)
