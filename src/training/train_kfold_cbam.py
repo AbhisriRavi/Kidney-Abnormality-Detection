@@ -39,7 +39,7 @@ parser.add_argument("--num-workers", type=int, default=4)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--tag", type=str, required=True)
 parser.add_argument("--manifest", type=str, default="v2",
-                    choices=["v2", "v2_roi"])
+                    choices=["v2", "v2_roi", "v3", "v3_roi"])
 parser.add_argument("--seed-suffix", type=str, default="",
                     help="Suffix for manifest file (e.g. '_seed123'). Default uses seed 42 manifest.")
 parser.add_argument("--smoke", action="store_true",
@@ -50,6 +50,8 @@ SCRATCH = Path(os.environ["SCRATCH"])
 manifest_dir_map = {
     "v2": SCRATCH / "kidney-data/processed/unified_v2",
     "v2_roi": SCRATCH / "kidney-data/processed/unified_v2_roi",
+    "v3": SCRATCH / "kidney-data/processed/unified_v3",
+    "v3_roi": SCRATCH / "kidney-data/processed/unified_v3_roi",
 }
 manifest_name = f"manifest_with_folds{args.seed_suffix}.csv"
 MANIFEST = manifest_dir_map[args.manifest] / manifest_name

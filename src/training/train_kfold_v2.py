@@ -1,14 +1,9 @@
 """
-K-fold cross-validation training on the v2 unified KiTS+Mendeley+KAUH+TCGA dataset.
+K-fold cross-validation training on the unified KiTS+Mendeley+KAUH+TCGA(+Abdalla) dataset.
 
-Identical training methodology to v1 (train_kfold.py):
-  - ResNet50 ImageNet-pretrained, 4-way head
-  - 5 folds, patient-grouped via the v2 manifest's 'fold' column
-  - Each fold: 90/10 patient-grouped train/val split within the 4 training folds
-  - Class-weighted CE, AdamW, cosine schedule, mixed precision
-  - Best checkpoint by val macro-F1
-
-Only difference: input manifest, output dir.
+Supports:
+  - Weighted class-balanced sampling (25% per class per batch)
+  - Focal loss (instead of class-weighted CE)
 """
 import os
 import csv
@@ -20,7 +15,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 from torch.cuda.amp import autocast, GradScaler
 from torchvision import transforms, models
 from PIL import Image
@@ -43,22 +39,32 @@ parser.add_argument("--num-workers", type=int, default=4)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--tag", type=str, default="v2_run1")
 parser.add_argument("--manifest", type=str, default="v2",
-                    choices=["v2", "v2_roi"],
-                    help="Which manifest to use: v2 (full image) or v2_roi (ROI crops)")
+                    choices=["v2", "v2_roi", "v3", "v3_roi"])
 parser.add_argument("--seed-suffix", type=str, default="",
-                    help="Suffix for manifest file (e.g. '_seed123'). Default uses seed 42 manifest.")
+                    help="Suffix for manifest file (e.g. '_seed123')")
+parser.add_argument("--folds-to-run", type=str, default="all",
+                    help="Comma-separated fold indices (e.g. '0' or '0,2,4') or 'all'")
+parser.add_argument("--aug-strength", type=str, default="mild",
+                    choices=["mild", "moderate", "strong"])
+parser.add_argument("--use-balanced-sampler", action="store_true",
+                    help="Use WeightedRandomSampler for class balance (25%% each)")
+parser.add_argument("--use-focal-loss", action="store_true",
+                    help="Use focal loss instead of class-weighted CE")
+parser.add_argument("--focal-gamma", type=float, default=2.0,
+                    help="Focal loss gamma parameter (default 2.0)")
 args = parser.parse_args()
 
 SCRATCH = Path(os.environ["SCRATCH"])
 manifest_dir_map = {
     "v2": SCRATCH / "kidney-data/processed/unified_v2",
     "v2_roi": SCRATCH / "kidney-data/processed/unified_v2_roi",
+    "v3": SCRATCH / "kidney-data/processed/unified_v3",
+    "v3_roi": SCRATCH / "kidney-data/processed/unified_v3_roi",
 }
 manifest_name = f"manifest_with_folds{args.seed_suffix}.csv"
 MANIFEST = manifest_dir_map[args.manifest] / manifest_name
 if not MANIFEST.exists():
     raise SystemExit(f"Manifest not found: {MANIFEST}")
-print(f"Using manifest: {MANIFEST}")
 print(f"Using manifest: {args.manifest} ({MANIFEST})")
 OUT = SCRATCH / "kidney-results/kfold" / args.tag
 OUT.mkdir(parents=True, exist_ok=True)
@@ -72,8 +78,14 @@ LABEL2IDX = {c: i for i, c in enumerate(CLASSES)}
 IDX2LABEL = {i: c for c, i in LABEL2IDX.items()}
 IMG_SIZE = 224
 N_FOLDS = 5
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
 
 print(f"Device: {DEVICE} | Output: {OUT}")
+print(f"HP: lr={args.lr}, wd={args.weight_decay}, bs={args.batch_size}, "
+      f"aug={args.aug_strength}, folds={args.folds_to_run}")
+print(f"Sampler: {'balanced' if args.use_balanced_sampler else 'shuffle'} | "
+      f"Loss: {'focal(g=%.1f)' % args.focal_gamma if args.use_focal_loss else 'weighted-CE'}")
 df = pd.read_csv(MANIFEST)
 print(f"Loaded {len(df)} images, {df['patient_id'].nunique()} patients across "
       f"{df['source'].nunique()} sources")
@@ -93,29 +105,76 @@ class KidneyDataset(Dataset):
         return im, LABEL2IDX[row["label"]]
 
 
-train_tf = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ColorJitter(brightness=0.1, contrast=0.1),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+def build_train_transforms(strength):
+    base = [transforms.Resize((IMG_SIZE, IMG_SIZE))]
+    if strength == "mild":
+        base += [transforms.RandomHorizontalFlip(0.5)]
+    elif strength == "moderate":
+        base += [
+            transforms.RandomHorizontalFlip(0.5),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        ]
+    elif strength == "strong":
+        base += [
+            transforms.RandomHorizontalFlip(0.5),
+            transforms.RandomRotation(10),
+            transforms.ColorJitter(brightness=0.1, contrast=0.1),
+            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
+            transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0)),
+        ]
+    base += [
+        transforms.ToTensor(),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ]
+    return transforms.Compose(base)
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal loss for multi-class classification.
+    L = -alpha_c * (1 - p_c)^gamma * log(p_c)
+    where p_c is the predicted probability of the true class,
+    and alpha_c is the per-class weight.
+    """
+    def __init__(self, alpha, gamma=2.0):
+        super().__init__()
+        self.register_buffer("alpha", alpha)  # shape [C]
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        # logits: [B, C], targets: [B]
+        log_probs = F.log_softmax(logits, dim=1)
+        probs = log_probs.exp()
+        target_log_probs = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        target_probs = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        alpha_t = self.alpha[targets]
+        focal_weight = (1.0 - target_probs) ** self.gamma
+        loss = -alpha_t * focal_weight * target_log_probs
+        return loss.mean()
+
+
+train_tf = build_train_transforms(args.aug_strength)
 eval_tf = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
 ])
 
 fold_metrics = []
 
-for fold in range(N_FOLDS):
-    print(f"\n{'=' * 60}\nFOLD {fold} / {N_FOLDS - 1}\n{'=' * 60}")
-    fold_out = OUT / f"fold_{fold}"
+if args.folds_to_run == "all":
+    folds_to_run = list(range(N_FOLDS))
+else:
+    folds_to_run = [int(x) for x in args.folds_to_run.split(",")]
+
+for fold_idx in folds_to_run:
+    print(f"\n{'=' * 60}\nFOLD {fold_idx} / {N_FOLDS - 1}\n{'=' * 60}")
+    fold_out = OUT / f"fold_{fold_idx}"
     fold_out.mkdir(exist_ok=True)
 
-    test_df = df[df["fold"] == fold].reset_index(drop=True)
-    trainval_df = df[df["fold"] != fold].reset_index(drop=True)
+    test_df = df[df["fold"] == fold_idx].reset_index(drop=True)
+    trainval_df = df[df["fold"] != fold_idx].reset_index(drop=True)
 
     splitter = GroupShuffleSplit(n_splits=1, test_size=0.10, random_state=args.seed)
     train_idx, val_idx = next(splitter.split(
@@ -135,9 +194,36 @@ for fold in range(N_FOLDS):
     ).to(DEVICE)
     print(f"  Class weights: {dict(zip(CLASSES, [round(w, 3) for w in class_weights.tolist()]))}")
 
-    train_loader = DataLoader(KidneyDataset(train_df, train_tf),
-                              batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    # Training loader — with optional balanced sampler
+    train_ds = KidneyDataset(train_df, train_tf)
+    if args.use_balanced_sampler:
+        # sample weight = 1 / class count for that image's class
+        # target 25% per class per batch, in expectation
+        sample_weights = torch.tensor([
+            1.0 / class_counts.get(train_df.iloc[i]["label"], 1)
+            for i in range(len(train_df))
+        ], dtype=torch.float)
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_df),
+            replacement=True
+        )
+        train_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, sampler=sampler,
+            num_workers=args.num_workers, pin_memory=True, drop_last=True
+        )
+        # Verify: draw one epoch, check class distribution
+        actual_dist = np.zeros(len(CLASSES), dtype=int)
+        for i in list(sampler)[:min(1000, len(sampler))]:
+            actual_dist[LABEL2IDX[train_df.iloc[i]["label"]]] += 1
+        print(f"  Sampler distribution (per 1000 samples): "
+              f"{dict(zip(CLASSES, actual_dist.tolist()))}")
+    else:
+        train_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, pin_memory=True, drop_last=True
+        )
+
     val_loader = DataLoader(KidneyDataset(val_df, eval_tf),
                             batch_size=args.batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=True)
@@ -149,7 +235,10 @@ for fold in range(N_FOLDS):
     model.fc = nn.Linear(model.fc.in_features, len(CLASSES))
     model = model.to(DEVICE)
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    if args.use_focal_loss:
+        criterion = FocalLoss(alpha=class_weights, gamma=args.focal_gamma)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = GradScaler()
@@ -200,7 +289,7 @@ for fold in range(N_FOLDS):
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             torch.save({"epoch": epoch + 1, "model_state": model.state_dict(),
-                        "val_macro_f1": val_f1, "fold": fold},
+                        "val_macro_f1": val_f1, "fold": fold_idx},
                        fold_out / "best.pth")
 
     print(f"  Loading best checkpoint (val_F1={best_val_f1:.4f})...")
@@ -231,7 +320,7 @@ for fold in range(N_FOLDS):
     cm = confusion_matrix(t_t, t_p, labels=range(len(CLASSES)))
 
     fold_result = {
-        "fold": fold,
+        "fold": fold_idx,
         "best_epoch": int(ckpt["epoch"]),
         "best_val_macro_f1": float(best_val_f1),
         "test_accuracy": float(acc),
@@ -250,15 +339,15 @@ for fold in range(N_FOLDS):
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
                 xticklabels=CLASSES, yticklabels=CLASSES, ax=ax)
     ax.set_xlabel("Predicted"); ax.set_ylabel("True")
-    ax.set_title(f"Fold {fold} | acc={acc:.3f} macro-F1={macro_f1:.3f}")
+    ax.set_title(f"Fold {fold_idx} | acc={acc:.3f} macro-F1={macro_f1:.3f}")
     plt.tight_layout()
     plt.savefig(fold_out / "confusion_matrix.png", dpi=110, bbox_inches="tight")
     plt.close()
 
-    print(f"  Fold {fold} test: acc={acc:.4f}, macro-F1={macro_f1:.4f}, macro-AUC={macro_auc:.4f}")
+    print(f"  Fold {fold_idx} test: acc={acc:.4f}, macro-F1={macro_f1:.4f}, macro-AUC={macro_auc:.4f}")
     fold_metrics.append(fold_result)
 
-print(f"\n{'=' * 60}\nAGGREGATE (mean ± std across {N_FOLDS} folds)\n{'=' * 60}")
+print(f"\n{'=' * 60}\nAGGREGATE (mean ± std across {len(fold_metrics)} folds)\n{'=' * 60}")
 accs = [m["test_accuracy"] for m in fold_metrics]
 f1s = [m["test_macro_f1"] for m in fold_metrics]
 aucs = [m["test_macro_auc"] for m in fold_metrics]
@@ -274,8 +363,15 @@ for c in CLASSES:
     print(f"  {c:<8} F1={np.mean(pc_f1):.4f} ± {np.std(pc_f1):.4f}  {auc_str}")
 
 summary = {
-    "n_folds": N_FOLDS, "epochs": args.epochs, "batch_size": args.batch_size,
-    "lr": args.lr, "weight_decay": args.weight_decay, "seed": args.seed,
+    "n_folds": len(fold_metrics),
+    "epochs": args.epochs, "batch_size": args.batch_size,
+    "lr": args.lr, "weight_decay": args.weight_decay,
+    "aug_strength": args.aug_strength, "seed": args.seed,
+    "manifest": args.manifest, "seed_suffix": args.seed_suffix,
+    "folds_run": folds_to_run,
+    "use_balanced_sampler": args.use_balanced_sampler,
+    "use_focal_loss": args.use_focal_loss,
+    "focal_gamma": args.focal_gamma,
     "fold_results": fold_metrics,
     "aggregate": {
         "accuracy_mean": float(np.mean(accs)), "accuracy_std": float(np.std(accs)),
@@ -289,4 +385,3 @@ summary = {
 }
 with open(OUT / "summary.json", "w") as f:
     json.dump(summary, f, indent=2)
-print(f"\nSaved aggregate summary to {OUT / 'summary.json'}")
