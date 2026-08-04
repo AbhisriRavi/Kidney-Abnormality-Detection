@@ -1,3 +1,6 @@
+# Pinned for reproducibility. The original file pinned only Python, which meant
+# the environment would not reconstruct reliably after any upstream release.
+# For an exact snapshot: conda env export --no-builds > environment.lock.yml
 name: kidney
 channels:
   - pytorch
@@ -5,26 +8,30 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
-  - pytorch
-  - torchvision
+  - pytorch=2.4.*
+  - torchvision=0.19.*
   - pytorch-cuda=12.1
-  - numpy
-  - pandas
-  - scikit-learn
-  - scikit-image
-  - matplotlib
-  - seaborn
+  - numpy=1.26.*
+  - pandas=2.2.*
+  - scikit-learn=1.5.*
+  - scikit-image=0.24.*
+  - scipy=1.14.*
+  - statsmodels=0.14.*          # McNemar test in src/evaluation/robust_stats.py
+  - matplotlib=3.9.*
+  - seaborn=0.13.*
+  - pyyaml=6.*
+  - tqdm=4.66.*
   - jupyter
   - ipykernel
-  - tqdm
-  - pyyaml
   - pip
   - pip:
-      - monai
-      - nibabel
-      - pydicom
-      - SimpleITK
-      - opencv-python
-      - albumentations
-      - tensorboard
-      - kaggle
+      - monai==1.3.2
+      - nibabel==5.2.1
+      - pydicom==2.4.4
+      - SimpleITK==2.4.0
+      - opencv-python==4.10.0.84
+      - albumentations==1.4.15
+      - timm==1.0.9             # ViT-Base backbone
+      - grad-cam==1.5.4
+      - tensorboard==2.17.1
+      - kaggle==1.6.17

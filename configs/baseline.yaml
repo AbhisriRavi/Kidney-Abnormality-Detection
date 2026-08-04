@@ -1,0 +1,69 @@
+# Reference configuration for the headline experiment.
+#
+# train_unified.py is driven by CLI flags; this file documents the canonical
+# settings so a reader can see every choice in one place, and so the values
+# reported in the dissertation methodology chapter have a single source of
+# truth. The equivalent command is:
+#   python -m src.training.train_unified --arch resnet50 --manifest v3c \
+#       --loss focal --balanced-sampler --lr 2e-4 --weight-decay 1e-5 \
+#       --batch-size 64 --aug-strength strong --epochs 25 --tag v3c_rn50_full
+
+experiment:
+  tag: v3c_rn50_full
+  seed: 42
+  n_folds: 5
+  cross_validation: patient-grouped 5-fold on patient_id
+
+data:
+  manifest: v3c                      # unified_v3_corrected
+  sources: [kits, mendeley, kauh, tcga, abdalla]
+  classes: [Normal, Cyst, Tumor, Stone]
+  image_size: 224
+  channels: grayscale replicated to 3 for ImageNet-pretrained backbones
+  normalisation:
+    mean: [0.485, 0.456, 0.406]
+    std:  [0.229, 0.224, 0.225]
+  val_split:
+    method: GroupShuffleSplit on patient_id, within the training folds
+    fraction: 0.10
+
+model:
+  arch: resnet50
+  weights: IMAGENET1K_V2
+  head: single 4-way linear
+  dropout: 0.2
+
+optimisation:
+  loss: focal                        # alternative: ce (class-weighted)
+  focal_gamma: 2.0
+  class_weights: inverse frequency, computed per fold on the training split
+  balanced_sampler: true             # ~25% per class per batch in expectation
+  optimizer: AdamW
+  lr: 2.0e-4
+  weight_decay: 1.0e-5
+  scheduler: CosineAnnealingLR
+  epochs: 25
+  batch_size: 64
+  mixed_precision: true              # torch.amp
+
+augmentation:
+  strength: strong
+  transforms:
+    - RandomHorizontalFlip(p=0.5)
+    - RandomRotation(10)
+    - ColorJitter(brightness=0.1, contrast=0.1)
+    - RandomAffine(translate=0.1, scale=[0.9, 1.1])
+    - GaussianBlur(kernel=5, sigma=[0.1, 2.0])
+
+selection:
+  checkpoint_metric: validation macro-F1
+  hyperparameter_metric: validation macro-F1   # NOT test; see hp_sweep_aggregate.py
+
+evaluation:
+  primary_unit: patient              # slice-level reported for comparability only
+  patient_aggregation: mean of per-slice probability vectors
+  metrics: [accuracy, balanced_accuracy, macro_f1, per_class_f1, macro_auc]
+  uncertainty: patient-clustered bootstrap, 2000 resamples, 95% percentile CI
+  pairwise_test: McNemar (exact below 25 discordant pairs) + paired bootstrap on delta
+  calibration: [ECE, MCE, Brier, reliability_diagram, selective_prediction]
+  external_validation: leave-one-source-out
