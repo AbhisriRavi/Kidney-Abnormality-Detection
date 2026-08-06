@@ -77,7 +77,7 @@ MANIFEST_DIRS = {
     "v3": "kidney-data/processed/unified_v3",
     "v3_roi": "kidney-data/processed/unified_v3_roi",
     "v3c": "kidney-data/processed/unified_v3_corrected",
-    "v3c_roi": "kidney-data/processed/unified_v3_corrected_roi",
+    "v3c_roi": "kidney-data/processed/unified_v3c_roi",
     "v4": "kidney-data/processed/unified_v4",
     "v4_roi": "kidney-data/processed/unified_v4_roi",
     "v4_roi_dilated": "kidney-data/processed/unified_v4_roi_dilated",

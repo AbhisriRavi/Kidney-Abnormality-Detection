@@ -39,9 +39,10 @@ from sklearn.metrics import (
 
 CLASSES = ["Normal", "Cyst", "Tumor", "Stone"]
 PROB_COLS = [f"p_{c}" for c in CLASSES]
+from src.evaluation.label_rules import LABEL_PRIORITY, resolve_patient_label
 
 
-def aggregate_to_patient(df: pd.DataFrame, how: str = "mean") -> pd.DataFrame:
+def aggregate_to_patient(df: pd.DataFrame, how: str = "mean", label_rule: str = "priority") -> pd.DataFrame:
     """Collapse per-slice predictions to one row per (fold, patient_id)."""
     if how == "vote":
         def _vote(g):
@@ -59,9 +60,14 @@ def aggregate_to_patient(df: pd.DataFrame, how: str = "mean") -> pd.DataFrame:
     else:
         raise ValueError(f"Unknown aggregation '{how}'")
 
+    # Ground truth per patient uses the MODAL slice label, not the first.
+    # "first" depends on row order, so two prediction files listing the same
+    # patient in a different order would disagree on that patient's label --
+    # which breaks any paired test downstream. mode() is order-independent and
+    # its output is sorted, so .iat[0] gives a deterministic tie-break.
     meta = df.groupby(["fold", "patient_id"], sort=False).agg(
         source=("source", "first"),
-        y_true=("y_true", "first"),
+        y_true=("y_true", lambda s: resolve_patient_label(s.values, label_rule)),
         n_slices=("y_true", "size"),
         label_consistent=("y_true", lambda s: s.nunique() == 1),
     )
@@ -71,9 +77,8 @@ def aggregate_to_patient(df: pd.DataFrame, how: str = "mean") -> pd.DataFrame:
 
     inconsistent = (~out["label_consistent"]).sum()
     if inconsistent:
-        print(f"  WARNING: {inconsistent} patients have slices with more than one "
-              f"label. Using the first label. Check your manifest construction "
-              f"if this number is not zero.")
+        print(f"  NOTE: {inconsistent} patients carry slices with more than one "
+              f"label. Resolved by the {label_rule} rule (Tumor > Cyst > Stone > Normal).")
     return out
 
 
@@ -122,6 +127,7 @@ def main():
     ap.add_argument("--predictions", nargs="+", required=True,
                     help="Prediction CSV stems under kidney-results/predictions/")
     ap.add_argument("--agg", default="mean", choices=["mean", "max", "vote"])
+    ap.add_argument("--label-rule", default="priority", choices=["priority", "modal"])
     ap.add_argument("--outdir", default=None)
     args = ap.parse_args()
 
@@ -142,8 +148,8 @@ def main():
         df = pd.read_csv(path)
 
         slice_scores = score(df, "slice")
-        pat_df = aggregate_to_patient(df, how=args.agg)
-        patient_scores = score(pat_df, f"patient_{args.agg}")
+        pat_df = aggregate_to_patient(df, how=args.agg, label_rule=args.label_rule)
+        patient_scores = score(pat_df, f"patient_{args.agg}_{args.label_rule}")
 
         n_pat = pat_df["patient_id"].nunique()
         slices_per = pat_df["n_slices"]
@@ -178,7 +184,7 @@ def main():
         cols = ["condition", "level", "n_units", "accuracy", "macro_f1", "macro_auc"] + \
                [f"f1_{c}" for c in CLASSES]
         summary = summary[cols]
-        out_csv = outdir / f"slice_vs_patient_{args.agg}.csv"
+        out_csv = outdir / f"slice_vs_patient_{args.agg}_{args.label_rule}.csv"
         summary.to_csv(out_csv, index=False)
         print(f"\n\n=== Combined summary ===")
         print(summary.to_string(index=False, float_format=lambda x: f"{x:.4f}"))

@@ -180,6 +180,7 @@ def main():
     ap.add_argument("--conditions", nargs="+", required=True)
     ap.add_argument("--level", default="patient", choices=["patient", "slice"])
     ap.add_argument("--agg", default="mean", choices=["mean", "max", "vote"])
+    ap.add_argument("--label-rule", default="priority", choices=["priority", "modal"])
     ap.add_argument("--n-bins", type=int, default=15)
     ap.add_argument("--temperature-scale", action="store_true")
     args = ap.parse_args()
@@ -197,7 +198,7 @@ def main():
             continue
         df = pd.read_csv(path)
         if args.level == "patient":
-            df = aggregate_to_patient(df, how=args.agg)
+            df = aggregate_to_patient(df, how=args.agg, label_rule=args.label_rule)
         name = f"{stem}_{args.level}"
         print(f"Analysing {name} ({len(df)} units)...")
         results.append(analyse(df, name, args.n_bins, outdir, args.temperature_scale))

@@ -159,11 +159,20 @@ def mcnemar_test(df_a, df_b):
     key = unit_key(df_a, df_b)
     merged = df_a[[key, "y_true", "y_pred"]].merge(
         df_b[[key, "y_true", "y_pred"]],
-        on=key, suffixes=("_a", "_b"), validate="one_to_one"
+        on=key, suffixes=("_a", "_b"), how="inner", validate="one_to_one"
     )
-    if (merged["y_true_a"] != merged["y_true_b"]).any():
-        raise ValueError("Ground-truth mismatch between conditions -- "
-                         "are these the same manifest?")
+    bad = merged["y_true_a"] != merged["y_true_b"]
+    if bad.any():
+        examples = merged.loc[bad, key].head(5).tolist()
+        raise ValueError(
+            f"Ground-truth mismatch on {int(bad.sum())} of {len(merged)} shared "
+            f"units, e.g. {examples}. Most often this means some patients carry "
+            f"slices with more than one label and the two conditions resolved "
+            f"the patient-level label differently. patient_level_eval.py now "
+            f"uses the modal label, which is order-independent; if this error "
+            f"persists the two prediction files disagree on ground truth and "
+            f"the manifests differ."
+        )
 
     ok_a = (merged["y_pred_a"] == merged["y_true_a"]).values
     ok_b = (merged["y_pred_b"] == merged["y_true_b"]).values
@@ -192,11 +201,11 @@ def mcnemar_test(df_a, df_b):
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
-def load_units(stem, pred_dir, level, agg):
+def load_units(stem, pred_dir, level, agg, label_rule="priority"):
     df = pd.read_csv(pred_dir / f"{stem}.csv")
     if level == "slice":
         return df
-    return aggregate_to_patient(df, how=agg)
+    return aggregate_to_patient(df, how=agg, label_rule=label_rule)
 
 
 def main():
@@ -204,11 +213,19 @@ def main():
     ap.add_argument("--conditions", nargs="+", required=True)
     ap.add_argument("--level", default="patient", choices=["patient", "slice"])
     ap.add_argument("--agg", default="mean", choices=["mean", "max", "vote"])
+    ap.add_argument("--label-rule", default="priority", choices=["priority", "modal"])
     ap.add_argument("--metrics", nargs="+",
                     default=["accuracy", "macro_f1"] + [f"f1_{c}" for c in CLASSES])
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--all-pairs", action="store_true",
                     help="Compare every pair, not just consecutive ones")
+    ap.add_argument("--no-match-units", action="store_true",
+                    help="Do NOT restrict all conditions to their shared units. "
+                         "Matching is on by default because ROI manifests often "
+                         "cover fewer patients than full-image manifests "
+                         "(segmentation failures), and comparing conditions "
+                         "scored on different populations confounds the "
+                         "region-focusing effect with a selection effect.")
     ap.add_argument("--alpha", type=float, default=0.05)
     args = ap.parse_args()
 
@@ -223,11 +240,25 @@ def main():
         if not path.exists():
             print(f"MISSING: {path}")
             continue
-        units[stem] = load_units(stem, pred_dir, args.level, args.agg)
+        units[stem] = load_units(stem, pred_dir, args.level, args.agg, args.label_rule)
         print(f"Loaded {stem}: {len(units[stem])} {args.level}-level units")
 
     if len(units) < 1:
         raise SystemExit("Nothing to analyse.")
+
+    # ---- restrict every condition to the units all of them share ----
+    if not args.no_match_units and len(units) > 1:
+        key = "patient_id" if args.level == "patient" else "path"
+        shared = set.intersection(*(set(d[key]) for d in units.values()))
+        sizes = {k: len(v) for k, v in units.items()}
+        if len(shared) < max(sizes.values()):
+            print(f"\nMATCHING to shared {args.level}s: {len(shared)} of "
+                  f"{max(sizes.values())} (per-condition before matching: {sizes})")
+            print("  Conditions are scored on an identical unit set, so the "
+                  "comparison is not confounded by differing coverage. "
+                  "Pass --no-match-units to disable.")
+            units = {k: v[v[key].isin(shared)].reset_index(drop=True)
+                     for k, v in units.items()}
 
     # ---- 1. Per-condition bootstrap CIs ----
     print(f"\n{'=' * 74}")
