@@ -99,7 +99,8 @@ def build_model(
         )
 
     if arch == "dann":
-        return DANNResNet50(n_classes=n_classes, n_sources=n_sources, dropout=dropout)
+        from src.models.dann import DANNResNet50 as _D
+        return _D(n_classes=n_classes, n_sources=n_sources, dropout=dropout)
 
     raise ValueError(f"Unknown arch '{arch}'. Expected one of {ARCHS}.")
 
