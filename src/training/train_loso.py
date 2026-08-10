@@ -63,6 +63,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+from src.data import norm as _norm
+from src.data.norm import make_norm
 from src.models.factory import build_model, forward_class_logits, probs_from_logits
 
 CLASSES = ["Normal", "Cyst", "Tumor", "Stone"]
@@ -114,7 +116,7 @@ def build_train_transforms(strength):
                                          scale=(0.9, 1.1)),
                  transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))]
     base += [transforms.ToTensor(),
-             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)]
+             make_norm()]
     return transforms.Compose(base)
 
 
@@ -147,9 +149,11 @@ def main():
                     choices=["mild", "moderate", "strong"])
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--norm-mode", default="imagenet", choices=["imagenet", "perimage"])
     ap.add_argument("--use-balanced-sampler", action="store_true", default=True)
     args = ap.parse_args()
 
+    _norm.MODE = args.norm_mode
     scratch = Path(os.environ["SCRATCH"])
     manifest = scratch / MANIFEST_DIRS[args.manifest] / "manifest_with_folds.csv"
     if not manifest.exists():
@@ -182,7 +186,7 @@ def main():
     eval_tf = transforms.Compose([
         transforms.Resize((IMG_SIZE, IMG_SIZE)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+        make_norm(),
     ])
 
     all_results = []
