@@ -34,3 +34,7 @@ slurm-*.err
 metadata/tcga/*.csv
 !metadata/tcga/downloaded.csv
 !metadata/tcga/downloaded_series.csv
+
+# Local analysis output (regenerable)
+ch4_*.txt
+fig*.pdf
