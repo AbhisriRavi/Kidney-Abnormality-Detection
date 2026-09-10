@@ -38,9 +38,9 @@ needed to separate pathology from provenance.
 Corrected dataset (v3c): 8,924 images from 561 patients across four sources, after a
 duplicated fifth source was identified and excluded.
 
-Patient-level accuracy and macro-F1, from Table 4.3. The two columns cover different
-patient populations, because ROI extraction discards 17.5% of patients to segmentation
-failure.
+Patient-level accuracy and macro-F1, from Table 4.3. The full-image and ROI columns cover
+different patient populations, because ROI extraction discards 17.5% of patients to
+segmentation failure.
 
 | Architecture | Full image accuracy (n=561) | Full image macro-F1 | ROI accuracy (n=463) | ROI macro-F1 |
 |---|---|---|---|---|
