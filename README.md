@@ -42,9 +42,8 @@ Patient-level accuracy and macro-F1, from Table 4.3. The two columns cover diffe
 patient populations, because ROI extraction discards 17.5% of patients to segmentation
 failure.
 
-| Architecture | Full image (n=561) | | ROI (n=463) | |
+| Architecture | Full image accuracy (n=561) | Full image macro-F1 | ROI accuracy (n=463) | ROI macro-F1 |
 |---|---|---|---|---|
-| | Accuracy | Macro-F1 | Accuracy | Macro-F1 |
 | ResNet50 | 0.8503 | 0.8211 | 0.8747 | 0.8320 |
 | CBAM | 0.7986 | 0.7317 | 0.8747 | 0.8474 |
 | ViT-B/16 | 0.8431 | 0.7888 | 0.8790 | 0.8470 |
