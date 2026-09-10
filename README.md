@@ -1,137 +1,186 @@
-# Kidney Abnormality Detection from CT Imaging
+# Kidney Abnormality Detection Using CT Imaging and Deep Neural Networks
 
-MSc Advanced Computer Science (AI) dissertation project, University of Leeds.
-Investigates whether kidney region-of-interest (ROI) extraction improves
-deep-learning classification of kidney abnormalities (Normal / Cyst / Tumor /
-Stone) compared with conventional full-slice input.
+Four-class classification of kidney CT (Normal, Cyst, Tumor, Stone) with
+patient-level evaluation across four independent acquisition sources.
 
-**Author:** Abhisri Ravi · **Supervisor:** Dr Samson Fabiyi · **Module:** COMP5200M
+MSc Advanced Computer Science (Artificial Intelligence) dissertation,
+School of Computer Science, University of Leeds, 2025/2026.
+Author: Abhisri Ravi. Supervisor: Dr Samson Fabiyi. Assessor: Dr Sharib Ali.
 
----
+## What this project found
 
-## Research questions
+Published classifiers for this task routinely report accuracies above 99%, which is
+hard to reconcile with the inter-observer agreement expert radiologists achieve on the
+same distinctions. This project tested two mechanisms that can produce such numbers
+without diagnostic ability, and found both.
 
-**RQ1.** Does kidney ROI extraction improve classification performance relative
-to full-image input, and is any effect uniform across abnormality classes?
+**Patient-level leakage.** Partitioning slices at image level puts slices from one
+patient in both training and test sets. A classifier scoring above 99% under
+image-level partitioning fell to roughly 38% on independently acquired patients,
+against 33.3% for assigning a single class to everything.
 
-**RQ2.** Does architectural sophistication (channel/spatial attention, vision
-transformers, multi-head outputs with an auxiliary segmentation objective)
-improve on a well-tuned plain ResNet50 baseline on this task?
+**Source-label collinearity.** Pooling public datasets in which acquisition source
+predicts class label lets a model recognise the source instead of the pathology. In the
+corrected dataset, two of the four sources contribute a single class each, so
+recognising the source is sufficient to predict the label for those patients. Under
+leave-one-source-out evaluation, accuracy on held-out sources ranged from 0.00 to 0.33,
+against 0.76 to 0.97 in distribution. On one fold the model was correct on 6 of 3,364
+images. Six mitigation strategies produced no improvement, and a control experiment
+removing preprocessing differences produced no recovery of transfer.
 
-**RQ3.** To what extent do models exploit the structural covariance between
-data source and class label rather than pathology-relevant image features, and
-does that covariance limit cross-source generalisation?
+The binding constraint is dataset composition, not model capacity. Where source and
+class are collinear, no loss function, architecture or invariance penalty recovers
+transferable performance, because the training data does not contain the evidence
+needed to separate pathology from provenance.
 
-## Headline findings
+## Results
 
-1. **Patient-level leakage in the Kaggle CT Kidney Dataset** inflates apparent
-   accuracy from an honest ~38% to ~99%. Slices from the same patient appear in
-   both training and test splits under the naive random split used by much of
-   the published literature on this dataset.
-2. **ROI extraction is a class-dependent trade-off, not a uniform gain.**
-   Replicated across three architectures with different inductive biases:
-   Cyst F1 +0.12 to +0.15, Tumor F1 +0.01 to +0.04, Stone F1 −0.06 to −0.19.
-   The Stone degradation has an anatomical explanation — calculi frequently sit
-   in the calyces, renal pelvis, and proximal ureter, outside a tight
-   parenchyma-bounded crop.
-3. **Architectural complexity does not help.** Plain ResNet50 outperforms
-   CBAM-ResNet50 and ViT-Base on accuracy, macro-F1, and macro-AUC, and has the
-   tightest cross-fold variance.
-4. **Source-shortcut learning is architecture-independent.** The dominant
-   source→class mapping is near-identical across all three architectures,
-   indicating a property of the data structure rather than the model.
-5. **KiTS23 performance sits near chance for every architecture.** KiTS is the
-   only source carrying three of the four classes, and therefore the only
-   source on which the task cannot be solved by recognising the scanner. This
-   is the strongest single piece of evidence for finding 4.
+Corrected dataset (v3c): 8,924 images from 561 patients across four sources, after a
+duplicated fifth source was identified and excluded.
 
----
+Patient-level accuracy and macro-F1, from Table 4.3. The two columns cover different
+patient populations, because ROI extraction discards 17.5% of patients to segmentation
+failure.
 
-## Repository layout
+| Architecture | Full image (n=561) | | ROI (n=463) | |
+|---|---|---|---|---|
+| | Accuracy | Macro-F1 | Accuracy | Macro-F1 |
+| ResNet50 | 0.8503 | 0.8211 | 0.8747 | 0.8320 |
+| CBAM | 0.7986 | 0.7317 | 0.8747 | 0.8474 |
+| ViT-B/16 | 0.8431 | 0.7888 | 0.8790 | 0.8470 |
+| DANN | 0.6381 | 0.6405 | | |
 
+**Do not read the ROI column as an improvement.** Comparing 0.8503 against 0.8747
+confounds the effect of cropping with the effect of having discarded the hardest 17.5%
+of patients from one arm. On the 463 patients present in both conditions, the effect of
+ROI extraction is -0.024 ([-0.061, +0.011]), a null result. Every per-class interval
+nonetheless excludes zero: Cyst and Tumor favour cropped input, Normal and Stone favour
+full images. Cropping also improves calibration.
+
+No architecture outperformed the baseline.
+
+Kidney segmentation for ROI extraction uses a MONAI U-Net, validation Dice 0.938.
+
+## Data
+
+No imaging data is redistributed here. The four constituent sources are obtained from
+their providers under their own licences; see `DATA.md` for terms and acquisition
+steps. A fifth source was acquired and excluded after it proved to be a preprocessed
+duplicate of another, overlapping on 201 of 201 patients.
+
+`metadata/tcga/` holds TCIA download manifests only. Per-series metadata is regenerable
+via `src/data/tcga/download_full.py`.
+
+## Repository structure
+```text
+configs/ experiment configuration files
+docs/ setup and reproduction notes
+metadata/ regenerable source metadata
+notebooks/ exploratory and verification analyses
+scripts/ SLURM launch and pipeline scripts
+src/data/ acquisition, preprocessing and manifests
+src/models/ model definitions
+src/training/ training entry points
+src/evaluation/ metrics, statistics and diagnostics
+src/utils/ shared utilities
+tests/ software checks
+dissertation/ result summaries and writing artefacts
 ```
-src/
-  data/          Dataset acquisition, preprocessing, manifest construction, ROI extraction
-  models/        Architecture definitions (factory.py is the single entry point)
-  training/      train_unified.py (main entry point), train_loso.py, train_segmenter.py
-                 legacy/  — superseded per-experiment scripts, retained for reproducibility
-  evaluation/    Metrics, patient-level aggregation, robust statistics, calibration,
-                 source-bias diagnostics, Grad-CAM/attention visualisation
-scripts/         SLURM submission scripts for the Aire HPC cluster
-notebooks/       Exploratory analysis and verification scripts
-configs/         Experiment configuration files
-dissertation/    Figures, tables, and writing notes
-metadata/tcga/   TCGA-KIRC per-series metadata (regenerable)
-docs/            Setup and reproduction instructions
-```
 
-## Datasets
 
-| Source | Classes contributed | Licence | Access |
-|---|---|---|---|
-| KiTS23 | Cyst, Normal, Tumor | CC BY-NC-SA 4.0 | github.com/neheller/kits23 |
-| Mendeley (Islam et al.) | Normal, Stone | CC BY 4.0 | Mendeley Data |
-| KAUH (Alzu'bi et al.) | Cyst | See publication | Journal of Healthcare Engineering |
-| TCGA-KIRC | Tumor | TCIA Data Usage Policy | The Cancer Imaging Archive |
-| Abdalla et al. (2025) | Stone, Normal | See publication | — |
+### Notes on naming and provenance
 
-All data is publicly available and anonymised. See
-`dissertation/ethics_and_licensing.md` for the full statement.
+Dataset versions (v2, v3, v3c, v4) are a property of the manifest, not the code. The
+reported baseline was produced by `train_kfold_v3_baseline.py` running against the v3c
+manifest, so a `v3_` filename does not indicate superseded results. Files keep their
+original names to preserve the link to the SLURM job logs.
 
-**Source × class structure is deliberately reported**, because it is not
-balanced: Cyst appears in 2 sources, Tumor in 2, Stone in 2, Normal in 3. This
-partial confounding between source and label is a central object of study in
-this project rather than an incidental limitation. Run
-`python -m src.training.train_loso --manifest v3c --hold-out all` to regenerate
-the cross-tabulation and the quantitative cross-source transfer results.
+`v4` manifests and trainers are exploratory work that was not carried into the
+dissertation. Nothing in the report is based on them.
 
-## Quick start
+Results under `dissertation/results/v3c/` are the corrected, reported set. Files under
+`dissertation/figures/` predate the duplicate-source correction and are retained only
+for history.
+
+Two corrections to Appendix C of the dissertation, found while preparing this
+repository:
+
+- The ROI manifest directory is `unified_v3c_roi`, not `unified_v3_corrected_roi`.
+- The headline `train_unified` command in Appendix C specifies `--loss focal
+  --balanced-sampler`. The reported Table 4.1 baseline was launched through
+  `scripts/v3c_baseline.sh`, which uses weighted cross-entropy and no balanced sampler.
+  Both are valid configurations; the launch script is the record of what produced the
+  reported numbers.
+
+Per-run provenance is split: `summary.json` records optimisation settings (learning
+rate, batch size, epochs, augmentation strength, seed, folds), while architecture, loss
+and manifest are fixed in the launch scripts, which are version-controlled.
+
+## Reproducing
+
+Requires a CUDA GPU and a writable scratch filesystem.
 
 ```bash
 conda env create -f environment.yml
 conda activate kidney
-export SCRATCH=/mnt/scratch/$USER        # or any writable directory
-
-# Train
-python -m src.training.train_unified --arch resnet50 --manifest v3c \
-    --loss focal --balanced-sampler --tag v3c_rn50_full
-
-# Evaluate (slice- and patient-level, CIs, calibration)
-bash scripts/run_all_analysis.sh
+export SCRATCH=/path/to/writable/scratch
 ```
 
-Full instructions, including data acquisition and the Aire HPC workflow, are in
-[`docs/setup.md`](docs/setup.md).
+Acquire the four sources per `DATA.md`, then build manifests, train and analyse. Full
+command sequence in `docs/setup.md` and Appendix C of the dissertation.
 
-## Evaluation protocol
+The reported experiment matrix was launched through the retained SLURM scripts:
 
-- **Patient-grouped 5-fold cross-validation.** No patient appears in more than
-  one fold; the trainer asserts this at run time.
-- **Two units of analysis.** Slice-level metrics are reported for continuity
-  with the literature; **patient-level metrics are the primary results**, since
-  patients are the independent unit and slice counts vary widely per patient.
-- **Model selection on validation macro-F1 only.** Hyperparameters and
-  checkpoints are chosen on a patient-disjoint validation split carved from the
-  training folds; test folds are never consulted during selection.
-- **Patient-clustered bootstrap CIs and McNemar tests**, rather than paired
-  t-tests over 5 fold means, which are badly underpowered after correction for
-  multiple comparisons.
-- **Leave-one-source-out external validation** to measure cross-source transfer.
-- **Calibration** (ECE, MCE, Brier, reliability diagrams, selective-prediction
-  curves), because accuracy alone does not establish clinical usability.
+```bash
+bash   scripts/v3c_baseline.sh
+bash   scripts/v3c_roi_all.sh
+sbatch scripts/cbam_full.sh cbam_v3c_full <v3c-full-manifest>
+sbatch scripts/vit_full.sh  vit_v3c_full  <v3c-full-manifest>
+bash   scripts/v3c_all_experiments.sh
+sbatch scripts/loso_train.sh
+bash   scripts/run_all_analysis.sh
+```
 
-## Reproducing the reported results
+A unified entry point covers the same architectures and manifests for new runs:
 
-Every experiment writes a `config.json` and `summary.json` under
-`$SCRATCH/kidney-results/kfold/<tag>/`, containing the resolved manifest path,
-the complete argument namespace, and per-fold metrics. Per-image predictions
-are written to `$SCRATCH/kidney-results/predictions/<tag>.csv`, which is the
-input to all downstream analysis.
+```bash
+python -m src.training.train_unified \
+  --arch resnet50 --manifest v3c --tag my_run \
+  --lr 2e-4 --weight-decay 1e-5 --batch-size 64 \
+  --aug-strength strong --epochs 25
+```
 
-## Citation
+Evaluation is driven from per-image prediction CSVs, so patient-level aggregation,
+bootstrap intervals, McNemar tests and calibration can be regenerated without
+retraining.
 
-If you use this code, please cite the dissertation:
+```bash
+pytest tests/ -v
+```
 
-> Ravi, A. (2026). *Kidney Abnormality Detection Using CT Imaging and Deep
-> Neural Networks.* MSc dissertation, School of Computer Science, University of
-> Leeds.
+The tests verify patient-disjoint folds, the manifest schema, the reported dataset
+sizes, and the per-source class composition on which the collinearity analysis rests.
+They skip cleanly when the data is not present.
+
+## Traceability
+
+| Reported item | Module | Input |
+|---|---|---|
+| Table 4.1 | `src/evaluation/patient_level_eval.py` | per-image prediction CSVs |
+| Figure 4.2, Table 4.2 | `src/evaluation/robust_stats.py` | matched patient predictions |
+| Table 4.4 | `src/evaluation/check_source_bias.py`, `per_source_matched_eval.py` | predictions with source field |
+| Table 4.5 | `src/training/train_loso.py` | `kidney-results/loso/` |
+| Table 4.7 | `src/evaluation/calibration.py` | patient prediction probabilities |
+
+## Compute
+
+207 SLURM jobs, 48.1 GPU hours, NVIDIA L40S, University of Leeds Aire HPC service.
+
+## Licence
+
+Code released under the MIT Licence, see `LICENSE`. Each data source retains its own
+licence and none is redistributed here; see `DATA.md`.
+
+## Disclaimer
+
+A research artefact. Not clinically validated, and must not inform patient care.
