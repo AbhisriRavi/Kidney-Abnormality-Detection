@@ -7,7 +7,7 @@ import matplotlib
 matplotlib.use("Agg")  # headless
 import matplotlib.pyplot as plt
 
-DATA_ROOT = Path("/mnt/scratch") / os.environ["USER"] / "kidney-data" / "raw" / "kaggle_ct_kidney"
+DATA_ROOT = Path(os.environ.get("SCRATCH", "/mnt/scratch/" + os.environ["USER"])) / "kidney-data" / "raw" / "kaggle_ct_kidney"
 # The unzipped folder may be nested — adjust:
 candidates = list(DATA_ROOT.rglob("Normal"))
 assert candidates, f"Couldn't find Normal/ under {DATA_ROOT}"
@@ -46,13 +46,13 @@ for i, cls in enumerate(CLASSES):
         axes[i, j].set_title(cls)
         axes[i, j].axis("off")
 plt.tight_layout()
-out = Path("/mnt/scratch") / os.environ["USER"] / "kidney-results" / "eda_samples.png"
+out = Path(os.environ.get("SCRATCH", "/mnt/scratch/" + os.environ["USER"])) / "kidney-results" / "eda_samples.png"
 out.parent.mkdir(parents=True, exist_ok=True)
 plt.savefig(out, dpi=120)
 print(f"\nSaved sample grid to {out}")
 
 # Save manifest
-manifest_path = Path("/mnt/scratch") / os.environ["USER"] / "kidney-data" / "processed" / "manifest.csv"
+manifest_path = Path(os.environ.get("SCRATCH", "/mnt/scratch/" + os.environ["USER"])) / "kidney-data" / "processed" / "manifest.csv"
 manifest_path.parent.mkdir(parents=True, exist_ok=True)
 df.to_csv(manifest_path, index=False)
 print(f"Saved manifest to {manifest_path}")

@@ -10,7 +10,7 @@
 module load miniforge/24.7.1
 conda activate kidney
 
-ROOT="/mnt/scratch/nsdg0836/kidney-data/raw/abdalla2025"
+ROOT="${SCRATCH:-/mnt/scratch/$USER}/kidney-data/raw/abdalla2025"
 INNER="$ROOT/Axial CT Imaging Dataset for AI-Powered Kidney Stone Detection A Resource for Deep Learning Research"
 
 cd "$INNER"

@@ -7,5 +7,5 @@
 
 module load miniforge/24.7.1
 conda activate kidney
-cd /mnt/scratch/users/$USER/kidney-data/raw/kits23/kits23
+cd ${SCRATCH:-/mnt/scratch/$USER}/kidney-data/raw/kits23/kits23
 kits23_download_data

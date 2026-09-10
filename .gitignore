@@ -13,9 +13,9 @@ __pycache__/
 .env
 
 # Data and results (top-level only)
-/data/
-/results/
-/results-scratch/
+/data
+/results
+/results-scratch
 
 # Model artefacts
 *.pth
@@ -32,3 +32,5 @@ slurm-*.err
 
 # Bulk TCGA per-series metadata (regenerable via src/data/tcga/download_full.py)
 metadata/tcga/*.csv
+!metadata/tcga/downloaded.csv
+!metadata/tcga/downloaded_series.csv
