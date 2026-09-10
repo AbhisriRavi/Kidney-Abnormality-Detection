@@ -3,7 +3,7 @@ Chapter 4 numbers on the corrected v3c dataset.
 
 Run on AIRE after dump_predictions has produced all six CSVs:
 
-    python ch4_v3c.py | tee ch4_v3c.txt
+    python -m src.evaluation.ch4_v3c | tee ch4_v3c.txt
 
 Produces:
   [1] Table 4.1 rows  - slice and patient metrics, all six conditions

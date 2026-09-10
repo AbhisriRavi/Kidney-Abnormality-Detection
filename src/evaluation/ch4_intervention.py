@@ -1,6 +1,6 @@
 """Section 4.5 intervention comparisons, v3c seed 42, patient-matched.
 
-Run:  python ch4_intervention.py
+Run:  python -m src.evaluation.ch4_intervention
 """
 import os
 import numpy as np
