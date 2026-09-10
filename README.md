@@ -166,10 +166,11 @@ They skip cleanly when the data is not present.
 
 | Reported item | Module | Input |
 |---|---|---|
-| Table 4.1 | `src/evaluation/patient_level_eval.py` | per-image prediction CSVs |
+| Table 4.1 | `src/evaluation/ch4_v3c.py`, `patient_level_eval.py` | per-image prediction CSVs |
 | Figure 4.2, Table 4.2 | `src/evaluation/robust_stats.py` | matched patient predictions |
 | Table 4.4 | `src/evaluation/check_source_bias.py`, `per_source_matched_eval.py` | predictions with source field |
 | Table 4.5 | `src/training/train_loso.py` | `kidney-results/loso/` |
+| Table 4.6 | `src/evaluation/ch4_intervention.py` | baseline and intervention predictions |
 | Table 4.7 | `src/evaluation/calibration.py` | patient prediction probabilities |
 
 ## Compute
