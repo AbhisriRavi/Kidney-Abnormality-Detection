@@ -17,6 +17,7 @@ dependencies:
   - scikit-image=0.24.*
   - scipy=1.14.*
   - statsmodels=0.14.*          # McNemar test in src/evaluation/robust_stats.py
+  - pytest=8.*                   # tests/test_manifests.py
   - matplotlib=3.9.*
   - seaborn=0.13.*
   - pyyaml=6.*
