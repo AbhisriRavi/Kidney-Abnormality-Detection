@@ -34,8 +34,8 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 SCRATCH = Path(os.environ["SCRATCH"])
-V3_MANIFEST = SCRATCH / "kidney-data/processed/unified_v3/manifest_with_folds.csv"
-V3_KFOLD = SCRATCH / "kidney-results/kfold/v3_rn50_full_run1_seed42"
+V3_MANIFEST = SCRATCH / "kidney-data/processed/unified_v3_corrected/manifest_with_folds.csv"
+V3_KFOLD = SCRATCH / "kidney-results/kfold/v3c_rn50_baseline_seed42"
 OUT = SCRATCH / "kidney-results/v3_analysis/gradcam"
 OUT.mkdir(parents=True, exist_ok=True)
 
@@ -140,7 +140,7 @@ for i, sample in enumerate(samples):
     for j, p in enumerate(probs):
         axes[i, 2].text(p + 0.02, j, f"{p:.2f}", va='center', fontsize=8)
 
-plt.suptitle(f"v3 RN50-full: Grad-CAM attention maps across classes and sources "
+plt.suptitle(f"v3c RN50-full: Grad-CAM attention maps across classes and sources "
              f"(fold {best_fold}, seed 42)", fontsize=13, y=1.00)
 plt.tight_layout()
 plt.savefig(OUT / "v3_gradcam.png", dpi=140, bbox_inches="tight")
